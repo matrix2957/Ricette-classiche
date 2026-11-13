@@ -26,7 +26,7 @@ export default function handler(req: ServerlessRequest, res: ServerlessResponse)
 
   res.status(200).json({
     ok: true,
-    service: 'focolare-api',
+    service: 'ricettario-ai-api',
     runtime: process.env.VERCEL ? 'vercel-serverless' : 'node-express',
     geminiConfigured,
     timestamp: new Date().toISOString(),

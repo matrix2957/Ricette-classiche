@@ -14,8 +14,8 @@ export default defineConfig(() => {
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
         manifest: {
           id: '/',
-          name: 'Focolare — Cucina Tradizionale',
-          short_name: 'Focolare',
+          name: 'Ricettario Ai — Cucina Tradizionale',
+          short_name: 'Ricettario Ai',
           description: 'Ricette di cucina tradizionale senza robot da cucina e senza pubblicità, pronte anche offline.',
           theme_color: '#2D5A3D',
           background_color: '#FAFAF7',

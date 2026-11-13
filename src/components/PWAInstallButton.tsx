@@ -50,7 +50,7 @@ export const PWAInstallButton: React.FC = () => {
                     id="ios-install-title"
                     className="font-display text-xl font-semibold text-[#1C1D1A]"
                   >
-                    Installa Focolare su iPhone
+                    Installa Ricettario Ai su iPhone
                   </h3>
                   <p className="mt-1 text-sm text-[#55574E]">
                     Usala a schermo intero come un’app nativa e consulta i preferiti anche senza internet.
@@ -96,7 +96,7 @@ export const PWAInstallButton: React.FC = () => {
                     3
                   </span>
                   <div className="pt-0.5">
-                    Tocca <strong>Aggiungi</strong> in alto a destra per avere l’icona Focolare sempre pronta in cucina.
+                    Tocca <strong>Aggiungi</strong> in alto a destra per avere l’icona Ricettario Ai sempre pronta in cucina.
                   </div>
                 </li>
               </ol>

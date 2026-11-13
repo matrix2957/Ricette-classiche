@@ -184,7 +184,7 @@ export default function App() {
             onClick={() => setActiveTab('search')}
             className="font-display text-xl sm:text-2xl font-semibold tracking-tight text-[#1C1D1A] whitespace-nowrap shrink-0 text-left"
           >
-            Focolare
+            Ricettario Ai
           </button>
 
           {/* Zone 2: Clean single-line nav links (Desktop) */}
@@ -327,7 +327,7 @@ export default function App() {
       {/* Desktop quiet footer */}
       <footer className="hidden md:block border-t border-[#E2E0D8] bg-[#F2F1EC]/50 py-5">
         <div className="mx-auto max-w-6xl px-6 flex items-center justify-between text-xs text-[#55574E]">
-          <span>Focolare — Cucina tradizionale senza robot da cucina e senza pubblicità</span>
+          <span>Ricettario Ai — Cucina tradizionale senza robot da cucina e senza pubblicità</span>
           <span>Preferiti e note salvati localmente sul dispositivo</span>
         </div>
       </footer>

@@ -20,7 +20,7 @@ async function startServer() {
     );
     res.json({
       ok: true,
-      service: 'focolare-api',
+      service: 'ricettario-ai-api',
       runtime: 'node-express',
       geminiConfigured,
       timestamp: new Date().toISOString(),
@@ -85,7 +85,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Focolare server in ascolto su http://0.0.0.0:${PORT}`);
+    console.log(`Ricettario Ai server in ascolto su http://0.0.0.0:${PORT}`);
   });
 }
 

@@ -1,22 +1,22 @@
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import type {
   CookingDifficulty,
+  CookingParams,
   GroundingSource,
   PreparedRecipe,
+  RecipeIngredient,
   RecipeSearchResponse,
   RecipeSearchResult,
+  RecipeStep,
 } from '../src/types/recipe.ts';
 
-const MODEL_NAME = 'gemini-4-hydrogen';
+const PRIMARY_MODEL = 'gemini-4-hydrogen';
+const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
 
-function getGeminiClient(): GoogleGenAI {
+function getGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-    const err = new Error(
-      'Chiave API Gemini non configurata sul server. Imposta GEMINI_API_KEY nelle variabili di ambiente o nel pannello Secrets.'
-    ) as Error & { statusCode?: number };
-    err.statusCode = 500;
-    throw err;
+    return null;
   }
   return new GoogleGenAI({
     apiKey,
@@ -81,8 +81,12 @@ function parseJsonLoose<T>(rawText: string, fallback: T): T {
 function normalizeDifficulty(val: string | undefined): CookingDifficulty {
   if (!val) return 'Media';
   const lower = val.toLowerCase();
-  if (lower.includes('facil') || lower.includes('semplic') || lower.includes('easy')) return 'Facile';
-  if (lower.includes('impegn') || lower.includes('diffic') || lower.includes('hard')) return 'Impegnativa';
+  if (lower.includes('facil') || lower.includes('semplic') || lower.includes('molto bassa') || lower.includes('bassa') || lower.includes('easy')) {
+    return 'Facile';
+  }
+  if (lower.includes('impegn') || lower.includes('diffic') || lower.includes('alta') || lower.includes('hard')) {
+    return 'Impegnativa';
+  }
   return 'Media';
 }
 
@@ -91,7 +95,9 @@ function decodeHtmlEntities(input: string): string {
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
     .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#39;|&apos;|&#x27;/gi, "'")
+    .replace(/&rsquo;|&lsquo;/gi, '’')
+    .replace(/&rdquo;|&ldquo;/gi, '"')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
     .replace(/&#(\d+);/g, (_, num) => String.fromCharCode(Number(num)))
@@ -100,7 +106,8 @@ function decodeHtmlEntities(input: string): string {
     .replace(/&agrave;/g, 'à')
     .replace(/&ograve;/g, 'ò')
     .replace(/&ugrave;/g, 'ù')
-    .replace(/&igrave;/g, 'ì');
+    .replace(/&igrave;/g, 'ì')
+    .replace(/&deg;/g, '°');
 }
 
 interface ExtractedWebPage {
@@ -150,7 +157,7 @@ function extractImageFromJsonLd(recipeObj: Record<string, unknown>): string | nu
   return null;
 }
 
-async function fetchCleanWebRecipePage(rawUrl: string): Promise<ExtractedWebPage | null> {
+async function fetchCleanWebRecipePage(rawUrl: string, timeoutMs = 8000): Promise<ExtractedWebPage | null> {
   const parsed = isSafePublicUrl(rawUrl);
   if (!parsed) return null;
 
@@ -158,7 +165,7 @@ async function fetchCleanWebRecipePage(rawUrl: string): Promise<ExtractedWebPage
     const response = await fetch(parsed.toString(), {
       method: 'GET',
       redirect: 'follow',
-      signal: AbortSignal.timeout(9000),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: {
         'User-Agent':
           'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
@@ -176,11 +183,9 @@ async function fetchCleanWebRecipePage(rawUrl: string): Promise<ExtractedWebPage
     const html = await response.text();
     if (!html || html.length < 200) return null;
 
-    // Extract title
     const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
     const title = titleMatch ? decodeHtmlEntities(titleMatch[1].replace(/\s+/g, ' ').trim()) : parsed.hostname;
 
-    // Extract og:image
     const ogImgMatch =
       html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
       html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
@@ -189,7 +194,6 @@ async function fetchCleanWebRecipePage(rawUrl: string): Promise<ExtractedWebPage
       imageUrl = null;
     }
 
-    // Extract JSON-LD Recipe blocks (ad-free structured data!)
     let jsonLdRecipe: string | null = null;
     const ldRegex = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
     let ldMatch: RegExpExecArray | null;
@@ -200,15 +204,14 @@ async function fetchCleanWebRecipePage(rawUrl: string): Promise<ExtractedWebPage
         if (recipeNode) {
           const ldImage = extractImageFromJsonLd(recipeNode);
           if (ldImage) imageUrl = ldImage;
-          jsonLdRecipe = JSON.stringify(recipeNode).slice(0, 14000);
+          jsonLdRecipe = JSON.stringify(recipeNode).slice(0, 16000);
           break;
         }
       } catch {
-        // Ignore malformed JSON-LD block and keep scanning
+        // Ignore malformed JSON-LD block
       }
     }
 
-    // Strip ads, scripts, nav, footer, cookie banners and extract readable text
     const stripped = html
       .replace(/<script[\s\S]*?<\/script>/gi, ' ')
       .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -250,7 +253,7 @@ function toCleanApiError(err: unknown): Error & { statusCode?: number } {
 
   if (rawMessage.includes('RESOURCE_EXHAUSTED') || rawMessage.includes('"code":429') || existing?.status === 429) {
     const cleanErr = new Error(
-      'Quota temporanea delle richieste Gemini esaurita (429). Attendi qualche istante e riprova, oppure verifica la chiave API nel pannello Settings > Secrets.'
+      'Quota temporanea delle richieste Gemini esaurita (429). Riprova tra qualche istante oppure incolla direttamente il link URL della ricetta.'
     ) as Error & { statusCode?: number };
     cleanErr.statusCode = 429;
     return cleanErr;
@@ -291,28 +294,211 @@ function parseIsoDurationMinutes(iso: unknown): number | null {
   return total > 0 ? total : null;
 }
 
-function parseIngredientLine(line: string, idx: number) {
+function parseNumericToken(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === '½') return 0.5;
+  if (trimmed === '¼') return 0.25;
+  if (trimmed === '¾') return 0.75;
+  if (trimmed === '⅓') return 0.33;
+  const fracMatch = trimmed.match(/^(\d+)\s*\/\s*(\d+)$/);
+  if (fracMatch) {
+    const den = Number(fracMatch[2]);
+    return den > 0 ? Number(fracMatch[1]) / den : null;
+  }
+  const num = Number(trimmed.replace(',', '.'));
+  return Number.isFinite(num) ? num : null;
+}
+
+function parseIngredientLine(line: string, idx: number): RecipeIngredient {
   const cleaned = decodeHtmlEntities(line).replace(/\s+/g, ' ').trim();
-  const match = cleaned.match(/^(\d+(?:[.,]\d+)?)\s*(g|gr|kg|ml|cl|l|cucchiai[o]?|cucchiain[oi]?|spicchi[o]?|fett[ae]|pizzic[oi]|foglie|mazz[oi])?\s+(?:di\s+)?(.+)$/i);
-  if (match) {
-    const qty = Number(match[1].replace(',', '.'));
+
+  // Extract optional trailing or inline parenthetical note when helpful
+  let working = cleaned;
+  let note: string | null = null;
+
+  // Pattern A: Quantity FIRST -> "320 g di spaghetti", "1/2 cipolla", "2 cucchiai di olio extravergine"
+  const leadRegex =
+    /^(\d+(?:[.,]\d+)?|\d+\s*\/\s*\d+|[½¼¾⅓])\s*(g|gr|kg|ml|cl|dl|l|litri|litro|cucchiai[o]?|cucchiain[oi]?|spicchi[o]?|fett[ae]|pizzic[oi]|foglie|mazz[oi]|ramett[oi]|vasett[oi]|bicchier[ei]|tazz[ae]|scatole)?\s*(?:di\s+|d['’])?(.+)$/i;
+  const leadMatch = working.match(leadRegex);
+  if (leadMatch) {
+    const qty = parseNumericToken(leadMatch[1]);
+    const unit = (leadMatch[2] || '').trim();
+    const rest = leadMatch[3].trim();
+    if (qty !== null && rest.length > 0 && !/^\d/.test(rest)) {
+      return {
+        id: `ing_${idx + 1}`,
+        name: rest,
+        quantity: qty,
+        unit,
+        note,
+        group: null,
+      };
+    }
+  }
+
+  // Pattern B: Italian "Name Quantity Unit" -> "Spaghetti 320 g", "Tuorli (di uova medie) 6", "Pepe nero q.b."
+  const qbMatch = working.match(/^(.+?)\s+(q\.?\s*b\.?|quanto basta|a piacere)$/i);
+  if (qbMatch) {
     return {
       id: `ing_${idx + 1}`,
-      name: match[3].trim(),
-      quantity: Number.isFinite(qty) ? qty : null,
-      unit: (match[2] || '').trim(),
-      note: null,
+      name: qbMatch[1].trim(),
+      quantity: null,
+      unit: 'q.b.',
+      note,
       group: null,
     };
   }
+
+  const tailUnitRegex =
+    /^(.+?)\s+(\d+(?:[.,]\d+)?|\d+\s*\/\s*\d+|[½¼¾⅓])\s*(g|gr|kg|ml|cl|dl|l|litri|litro|cucchiai[o]?|cucchiain[oi]?|spicchi[o]?|fett[ae]|pizzic[oi]|foglie|mazz[oi]|ramett[oi]|vasett[oi]|bicchier[ei]|tazz[ae])?$/i;
+  const tailMatch = working.match(tailUnitRegex);
+  if (tailMatch) {
+    const rawName = tailMatch[1].trim();
+    const qty = parseNumericToken(tailMatch[2]);
+    const unit = (tailMatch[3] || '').trim();
+    const parenMatch = rawName.match(/^(.+?)\s*\(([^)]+)\)$/);
+    const name = parenMatch ? parenMatch[1].trim() : rawName;
+    if (parenMatch) note = parenMatch[2].trim();
+
+    if (qty !== null && name.length > 0) {
+      return {
+        id: `ing_${idx + 1}`,
+        name,
+        quantity: qty,
+        unit,
+        note,
+        group: null,
+      };
+    }
+  }
+
   return {
     id: `ing_${idx + 1}`,
-    name: cleaned,
+    name: working,
     quantity: null,
     unit: 'q.b.',
-    note: null,
+    note,
     group: null,
   };
+}
+
+function cleanStepText(raw: string): string {
+  return decodeHtmlEntities(raw)
+    .replace(/<[^>]+>/g, ' ')
+    // Remove GialloZafferano-style inline step photo indices like "a fette 1 e poi 2 3 ."
+    .replace(/\s+(?:\d{1,2}\s+)+([.,;!?])/g, '$1')
+    .replace(/([a-zàèéìòù])\s+\d{1,2}(?=\s+(?:e|o|poi|nel|nella|sul|sulla|con|per|in|a|da|di)\b)/gi, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function inferCookingParamsFromText(text: string): CookingParams {
+  // Duration extraction
+  let durationSeconds: number | null = null;
+  let durationLabel: string | null = null;
+
+  const hourMinMatch = text.match(/(\d+)\s*(?:ora|ore)\s*(?:e\s*(\d+)\s*min(?:uti)?)?/i);
+  const minMatch = text.match(/(?:circa\s*)?(\d+(?:-\d+)?)\s*(?:minuti|minuto|min\b)/i);
+  const secMatch = text.match(/(?:circa\s*)?(\d+)\s*(?:secondi|secondo|sec\b)/i);
+
+  if (hourMinMatch) {
+    const h = Number(hourMinMatch[1]);
+    const m = Number(hourMinMatch[2] || 0);
+    durationSeconds = h * 3600 + m * 60;
+    durationLabel = m > 0 ? `${h} h ${m} min` : `${h} h`;
+  } else if (minMatch) {
+    const firstNum = Number(minMatch[1].split('-')[0]);
+    durationSeconds = firstNum * 60;
+    durationLabel = `${minMatch[1]} min`;
+  } else if (secMatch) {
+    durationSeconds = Number(secMatch[1]);
+    durationLabel = `${secMatch[1]} sec`;
+  }
+
+  // Heat or Oven Temp
+  let heatOrTemp: string | null = null;
+  const ovenMatch = text.match(/(forno(?:\s+(?:statico|ventilato|preriscaldato))?[^.,;]{0,20}\d{2,3}\s*°\s*C?|\d{2,3}\s*°\s*C?)/i);
+  if (ovenMatch) {
+    const tempNum = ovenMatch[0].match(/\d{2,3}/)?.[0];
+    const isVentilato = /ventilat/i.test(text);
+    heatOrTemp = tempNum
+      ? `Forno ${isVentilato ? 'ventilato' : 'statico'} ${tempNum}°C`
+      : ovenMatch[0].trim();
+  } else if (/fiamma\s+medio[-\s]?alt[ao]|fuoco\s+medio[-\s]?alt[ao]/i.test(text)) {
+    heatOrTemp = 'Fiamma medio-alta';
+  } else if (/fiamma\s+medio[-\s]?bass[ao]|fuoco\s+medio[-\s]?bass[ao]/i.test(text)) {
+    heatOrTemp = 'Fuoco medio-basso';
+  } else if (/fuoco\s+dolc|fuoco\s+bass|fiamma\s+dolc|fiamma\s+bass|fuoco\s+lent/i.test(text)) {
+    heatOrTemp = 'Fuoco dolce';
+  } else if (/fiamma\s+vivac|fuoco\s+vivac|fuoco\s+alt|fiamma\s+alt/i.test(text)) {
+    heatOrTemp = 'Fiamma vivace';
+  } else if (/fuoco\s+medi|fiamma\s+medi/i.test(text)) {
+    heatOrTemp = 'Fuoco medio';
+  } else if (/boll/i.test(text)) {
+    heatOrTemp = 'Ebollizione su fornello';
+  } else if (/fuoco|fornell|padell|pentol/i.test(text)) {
+    heatOrTemp = 'Fuoco medio';
+  } else {
+    heatOrTemp = 'A crudo / Temperatura ambiente';
+  }
+
+  // Utensil
+  let utensil = 'Piano di lavoro / Ciotola';
+  if (/forno|teglia|pirofila|tortiera|stampo/i.test(text)) {
+    utensil = 'Teglia da forno';
+  } else if (/padella/i.test(text)) {
+    utensil = 'Padella ampia';
+  } else if (/casseruola/i.test(text)) {
+    utensil = 'Casseruola';
+  } else if (/tegame/i.test(text)) {
+    utensil = 'Tegame';
+  } else if (/pentola/i.test(text)) {
+    utensil = 'Pentola';
+  } else if (/frusta/i.test(text)) {
+    utensil = 'Ciotola e frusta a mano';
+  } else if (/ciotola|terrina/i.test(text)) {
+    utensil = 'Ciotola';
+  }
+
+  // Method
+  let method = 'Preparazione manuale';
+  if (/inforn|forno/i.test(text)) method = 'Cottura in forno';
+  else if (/rosol|dorar|soffrig|soffritt/i.test(text)) method = 'Rosolatura';
+  else if (/mantec/i.test(text)) method = 'Mantecatura';
+  else if (/bolli|tuffat|cuoceteli\s+al\s+dente|scolat/i.test(text)) method = 'Bollitura';
+  else if (/sfum/i.test(text)) method = 'Sfumatura e riduzione';
+  else if (/sbatt|mescol|amalgam|monta/i.test(text)) method = 'Lavorazione a mano';
+  else if (/ripos|raffredd|frigorifer/i.test(text)) method = 'Riposo';
+  else if (/tagli|trit|affett|cubetti|listarelle/i.test(text)) method = 'Taglio al coltello';
+
+  return {
+    durationSeconds,
+    durationLabel,
+    heatOrTemp,
+    utensil,
+    method,
+  };
+}
+
+function inferStepTitle(text: string, idx: number, method: string): string {
+  const firstClause = text.split(/[.,;:]/)[0].trim();
+  if (firstClause.length > 4 && firstClause.length <= 44) {
+    return firstClause.charAt(0).toUpperCase() + firstClause.slice(1);
+  }
+  return `${method} · Fase ${idx + 1}`;
+}
+
+function sanitizeRobotMentions(text: string): { text: string; wasAdapted: boolean } {
+  const robotRegex = /\b(bimby|thermomix|monsieur\s+cuisine|kcook|multicooker|varoma|boccale\s+del\s+bimby)\b/i;
+  if (!robotRegex.test(text)) {
+    return { text, wasAdapted: false };
+  }
+  const adapted = text
+    .replace(/\bnel\s+boccale(?:\s+del\s+bimby)?\b/gi, 'in una pentola o ciotola capiente')
+    .replace(/\bcon\s+il\s+(?:bimby|thermomix|monsieur\s+cuisine|robot)\b/gi, 'a mano sul fornello')
+    .replace(/\b(?:bimby|thermomix|monsieur\s+cuisine|kcook|multicooker)\b/gi, 'pentola tradizionale')
+    .replace(/\bvaroma\b/gi, 'cestello per cottura a vapore su pentola');
+  return { text: adapted, wasAdapted: true };
 }
 
 function buildRecipeFromJsonLdFallback(
@@ -323,8 +509,8 @@ function buildRecipeFromJsonLdFallback(
 ): PreparedRecipe | null {
   try {
     const node = JSON.parse(jsonLdRaw) as Record<string, unknown>;
-    const title = typeof node.name === 'string' ? decodeHtmlEntities(node.name).trim() : '';
-    if (!title) return null;
+    const rawTitle = typeof node.name === 'string' ? decodeHtmlEntities(node.name).trim() : '';
+    if (!rawTitle) return null;
 
     const rawIngredients = Array.isArray(node.recipeIngredient) ? node.recipeIngredient : [];
     const ingredients = rawIngredients
@@ -340,15 +526,18 @@ function buildRecipeFromJsonLdFallback(
     const stepsText: string[] = [];
     for (const entry of rawInstructions) {
       if (typeof entry === 'string') {
-        stepsText.push(decodeHtmlEntities(entry).trim());
+        const cleaned = cleanStepText(entry);
+        if (cleaned) stepsText.push(cleaned);
       } else if (entry && typeof entry === 'object') {
         const obj = entry as Record<string, unknown>;
         if (typeof obj.text === 'string') {
-          stepsText.push(decodeHtmlEntities(obj.text).trim());
+          const cleaned = cleanStepText(obj.text);
+          if (cleaned) stepsText.push(cleaned);
         } else if (Array.isArray(obj.itemListElement)) {
           for (const sub of obj.itemListElement) {
             if (sub && typeof sub === 'object' && typeof (sub as Record<string, unknown>).text === 'string') {
-              stepsText.push(decodeHtmlEntities(String((sub as Record<string, unknown>).text)).trim());
+              const cleaned = cleanStepText(String((sub as Record<string, unknown>).text));
+              if (cleaned) stepsText.push(cleaned);
             }
           }
         }
@@ -357,36 +546,45 @@ function buildRecipeFromJsonLdFallback(
 
     if (ingredients.length === 0 || stepsText.length === 0) return null;
 
-    const steps = stepsText.filter(Boolean).map((text, idx) => {
-      const minMatch = text.match(/(\d+)\s*(?:minuti|minuto|min\b)/i);
-      const durationSeconds = minMatch ? Number(minMatch[1]) * 60 : null;
-      const tempMatch = text.match(/(\d{2,3})\s*°\s*C?/i);
+    let adaptedFromRobot = false;
+    const utensilSet = new Set<string>();
+
+    const steps: RecipeStep[] = stepsText.map((rawStep, idx) => {
+      const sanitized = sanitizeRobotMentions(rawStep);
+      if (sanitized.wasAdapted) adaptedFromRobot = true;
+      const cookingParams = inferCookingParamsFromText(sanitized.text);
+      utensilSet.add(cookingParams.utensil);
       return {
         stepNumber: idx + 1,
-        title: `Passaggio ${idx + 1}`,
-        instruction: text,
-        cookingParams: {
-          durationSeconds,
-          durationLabel: minMatch ? `${minMatch[1]} min` : null,
-          heatOrTemp: tempMatch ? `Forno ${tempMatch[1]}°C` : null,
-          utensil: /forno|teglia/i.test(text) ? 'Forno e teglia' : /padella/i.test(text) ? 'Padella' : 'Pentola / Casseruola',
-          method: /forno|inforn/i.test(text) ? 'Cottura in forno' : /bolli|less/i.test(text) ? 'Bollitura' : 'Preparazione tradizionale',
-        },
+        title: inferStepTitle(sanitized.text, idx, cookingParams.method),
+        instruction: sanitized.text,
+        cookingParams,
         tip: null,
       };
     });
 
     const yieldRaw = Array.isArray(node.recipeYield) ? node.recipeYield[0] : node.recipeYield;
-    const yieldMatch = typeof yieldRaw === 'string' || typeof yieldRaw === 'number' ? String(yieldRaw).match(/\d+/) : null;
+    const yieldMatch =
+      typeof yieldRaw === 'string' || typeof yieldRaw === 'number'
+        ? String(yieldRaw).match(/\d+/)
+        : null;
     const servings = yieldMatch ? Math.max(1, Number(yieldMatch[0])) : 4;
 
+    const desc =
+      typeof node.description === 'string'
+        ? cleanStepText(node.description).slice(0, 170)
+        : 'Ricetta tradizionale estratta in formato pulito senza pubblicità.';
+
+    const slug = rawTitle
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 48);
+
     return {
-      id: `rec_jsonld_${Date.now()}`,
-      title,
-      subtitle:
-        typeof node.description === 'string'
-          ? decodeHtmlEntities(node.description).slice(0, 160).trim()
-          : 'Ricetta estratta dal formato strutturato della pagina senza pubblicità.',
+      id: `rec_${slug || 'ricetta'}_${Date.now()}`,
+      title: rawTitle,
+      subtitle: desc,
       sourceName: sourceHost,
       sourceUrl: cleanUrl || null,
       imageUrl,
@@ -394,8 +592,8 @@ function buildRecipeFromJsonLdFallback(
       prepTimeMinutes: parseIsoDurationMinutes(node.prepTime) ?? 15,
       cookTimeMinutes: parseIsoDurationMinutes(node.cookTime) ?? 25,
       difficulty: 'Media',
-      traditionalUtensils: ['Padella', 'Pentola', 'Forno'],
-      adaptedFromRobot: false,
+      traditionalUtensils: Array.from(utensilSet).slice(0, 4),
+      adaptedFromRobot,
       ingredients,
       steps,
       preparedAt: new Date().toISOString(),
@@ -403,6 +601,110 @@ function buildRecipeFromJsonLdFallback(
   } catch {
     return null;
   }
+}
+
+function isRobotRecipeUrlOrText(text: string): boolean {
+  return /\b(bimby|thermomix|monsieur[- ]cuisine|multicooker|tm5|tm6|tm31|kcook)\b/i.test(text);
+}
+
+function detectPrimaryUtensil(text: string): string {
+  const hasForno = /\b(forno|teglia|pirofila|infornat)\b/i.test(text);
+  const hasPadella = /\b(padella|rosolat|soffritt|saltat)\b/i.test(text);
+  const hasPentola = /\b(pentola|casseruola|tegame|bollit|less)\b/i.test(text);
+  if (hasForno && (hasPadella || hasPentola)) return 'Fornelli e Forno';
+  if (hasForno) return 'Forno';
+  if (hasPadella) return 'Padella';
+  if (hasPentola) return 'Pentola';
+  return 'Padella / Pentola';
+}
+
+async function discoverRecipeUrlsFromWeb(query: string): Promise<Array<{ url: string; titleHint: string }>> {
+  const candidates: Array<{ url: string; titleHint: string }> = [];
+  const seen = new Set<string>();
+
+  const blockedHosts = [
+    'youtube.com',
+    'youtu.be',
+    'pinterest.',
+    'facebook.com',
+    'instagram.com',
+    'tiktok.com',
+    'amazon.',
+    'ricettario-bimby',
+    'ricetteperbimby',
+  ];
+
+  const addCandidate = (rawUrl: string, titleHint = '') => {
+    const parsed = isSafePublicUrl(rawUrl);
+    if (!parsed) return;
+    const normalized = parsed.toString();
+    const host = parsed.hostname.toLowerCase();
+    if (blockedHosts.some((b) => host.includes(b))) return;
+    if (isRobotRecipeUrlOrText(normalized) || isRobotRecipeUrlOrText(titleHint)) return;
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push({ url: normalized, titleHint: decodeHtmlEntities(titleHint).trim() });
+  };
+
+  // 1) DuckDuckGo HTML Search (fast, multi-source Italian web search)
+  try {
+    const ddgQuery = encodeURIComponent(`ricetta ${query} tradizionale -bimby -thermomix -multicooker`);
+    const ddgRes = await fetch(`https://html.duckduckgo.com/html/?q=${ddgQuery}`, {
+      signal: AbortSignal.timeout(5500),
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept-Language': 'it-IT,it;q=0.9',
+      },
+    });
+    if (ddgRes.ok) {
+      const html = await ddgRes.text();
+      const linkRegex = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+      let m: RegExpExecArray | null;
+      while ((m = linkRegex.exec(html)) !== null) {
+        let href = m[1];
+        const titleHint = m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        const uddgMatch = href.match(/[?&]uddg=([^&]+)/);
+        if (uddgMatch) {
+          try {
+            href = decodeURIComponent(uddgMatch[1]);
+          } catch {
+            // keep href
+          }
+        }
+        addCandidate(href, titleHint);
+        if (candidates.length >= 7) break;
+      }
+    }
+  } catch {
+    // Continue to direct culinary site search fallback
+  }
+
+  // 2) GialloZafferano direct search fallback if DDG returned few results
+  if (candidates.length < 3) {
+    try {
+      const slug = encodeURIComponent(query.trim().toLowerCase().replace(/\s+/g, '+'));
+      const gzRes = await fetch(`https://www.giallozafferano.it/ricerca-ricette/${slug}/`, {
+        signal: AbortSignal.timeout(5500),
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15',
+        },
+      });
+      if (gzRes.ok) {
+        const html = await gzRes.text();
+        const urlMatches = html.matchAll(/https:\/\/ricette\.giallozafferano\.it\/[A-Za-z0-9_-]+\.html/g);
+        for (const um of urlMatches) {
+          addCandidate(um[0], '');
+          if (candidates.length >= 6) break;
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  return candidates.slice(0, 6);
 }
 
 export async function searchTraditionalRecipes(rawQuery: string): Promise<RecipeSearchResponse> {
@@ -415,36 +717,126 @@ export async function searchTraditionalRecipes(rawQuery: string): Promise<Recipe
     throw err;
   }
 
+  // Primary: Real multi-source web discovery + Schema.org JSON-LD inspection (instant, zero quota burn, ad-free!)
+  const candidates = await discoverRecipeUrlsFromWeb(query);
+
+  if (candidates.length > 0) {
+    const inspected = await Promise.all(
+      candidates.slice(0, 5).map(async (cand, idx): Promise<RecipeSearchResult | null> => {
+        const page = await fetchCleanWebRecipePage(cand.url, 4500);
+        let host = 'Fonte Web';
+        try {
+          host = new URL(cand.url).hostname.replace(/^www\./, '');
+        } catch {
+          // ignore
+        }
+
+        if (page?.jsonLdRecipe) {
+          try {
+            const node = JSON.parse(page.jsonLdRecipe) as Record<string, unknown>;
+            const title =
+              typeof node.name === 'string'
+                ? decodeHtmlEntities(node.name).trim()
+                : cand.titleHint || page.title;
+            if (isRobotRecipeUrlOrText(title)) return null;
+
+            const descRaw =
+              typeof node.description === 'string'
+                ? cleanStepText(node.description)
+                : 'Ricetta tradizionale preparata senza robot da cucina.';
+            const prepMins = parseIsoDurationMinutes(node.prepTime);
+            const cookMins = parseIsoDurationMinutes(node.cookTime);
+            const yieldRaw = Array.isArray(node.recipeYield) ? node.recipeYield[0] : node.recipeYield;
+            const yieldMatch =
+              typeof yieldRaw === 'string' || typeof yieldRaw === 'number'
+                ? String(yieldRaw).match(/\d+/)
+                : null;
+            const servings = yieldMatch ? Math.max(1, Number(yieldMatch[0])) : 4;
+
+            return {
+              id: `res_${Date.now()}_${idx}`,
+              title,
+              sourceName: host,
+              sourceUrl: cand.url,
+              description: descRaw.length > 145 ? `${descRaw.slice(0, 142)}...` : descRaw,
+              prepTimeMinutes: prepMins,
+              cookTimeMinutes: cookMins,
+              servings,
+              primaryUtensil: detectPrimaryUtensil(`${title} ${page.jsonLdRecipe}`),
+              difficulty: 'Media',
+              region: 'Tradizione italiana',
+            };
+          } catch {
+            // Fall through to metadata result
+          }
+        }
+
+        if (cand.titleHint || page?.title) {
+          const cleanTitle = (cand.titleHint || page?.title || query)
+            .replace(/\s*[-|–]\s*(GialloZafferano|La Cucina Italiana|Cucchiaio).*$/i, '')
+            .trim();
+          return {
+            id: `res_${Date.now()}_${idx}`,
+            title: cleanTitle,
+            sourceName: host,
+            sourceUrl: cand.url,
+            description: 'Ricetta tradizionale dal web pronta per essere estratta senza pubblicità.',
+            prepTimeMinutes: null,
+            cookTimeMinutes: null,
+            servings: 4,
+            primaryUtensil: detectPrimaryUtensil(`${cleanTitle} ${page?.cleanText || ''}`),
+            difficulty: 'Media',
+            region: null,
+          };
+        }
+
+        return null;
+      })
+    );
+
+    const cleanResults = inspected.filter((r): r is RecipeSearchResult => r !== null);
+    if (cleanResults.length > 0) {
+      return {
+        query,
+        results: cleanResults,
+        groundingSources: cleanResults.map((r) => ({
+          title: `${r.title} (${r.sourceName})`,
+          url: r.sourceUrl,
+        })),
+      };
+    }
+  }
+
+  // Secondary fallback: Gemini Google Search grounding if direct web discovery returned nothing
   const ai = getGeminiClient();
+  if (!ai) {
+    return { query, results: [], groundingSources: [] };
+  }
 
   const prompt = `Cerca sul web ricette di cucina tradizionale per: "${query}".
-
-REGOLE RIGIDE DI SELEZIONE:
-1. Scegli SOLO ricette di cucina tradizionale casalinga cucinate senza robot da cucina (niente Bimby, Thermomix, Monsieur Cuisine, Multicooker automatici o robot simili: solo fornelli, forno, padella, pentola, casseruola, tegame, frusta a mano).
-2. Escludi pagine spam, annunci pubblicitari o siti non pertinenti. Prediligi fonti italiane affidabili e ricette autentiche.
-3. Restituisci esclusivamente un JSON valido (senza testo extra prima o dopo) con questa esatta struttura:
+Scegli SOLO ricette senza robot da cucina (solo fornelli, forno, padella, pentola).
+Restituisci esclusivamente JSON valido:
 {
   "results": [
     {
       "title": "Nome autentico del piatto",
-      "sourceName": "Nome del sito (es. GialloZafferano)",
-      "sourceUrl": "URL completo della ricetta trovata sul web",
-      "description": "Breve descrizione pulita in italiano (max 140 caratteri) del piatto e del metodo tradizionale.",
+      "sourceName": "Nome del sito",
+      "sourceUrl": "URL completo della ricetta",
+      "description": "Breve descrizione pulita in italiano (max 140 caratteri).",
       "prepTimeMinutes": 15,
       "cookTimeMinutes": 25,
       "servings": 4,
       "primaryUtensil": "Padella | Pentola | Forno | Casseruola | Fornelli e Forno",
       "difficulty": "Facile | Media | Impegnativa",
-      "region": "Regione o tradizione (es. Lazio, Emilia-Romagna, Tradizione italiana)"
+      "region": "Regione o tradizione"
     }
   ]
-}
-Fornisci da 4 a 6 risultati concreti e reali trovati tramite la ricerca web.`;
+}`;
 
   let response;
   try {
     response = await ai.models.generateContent({
-      model: MODEL_NAME,
+      model: PRIMARY_MODEL,
       contents: prompt,
       config: {
         systemInstruction:
@@ -514,8 +906,10 @@ Fornisci da 4 a 6 risultati concreti e reali trovati tramite la ricerca web.`;
         sourceUrl: url,
         description:
           item.description?.trim() || 'Ricetta tradizionale preparata con metodi classici da cucina.',
-        prepTimeMinutes: typeof item.prepTimeMinutes === 'number' ? Math.max(1, Math.round(item.prepTimeMinutes)) : null,
-        cookTimeMinutes: typeof item.cookTimeMinutes === 'number' ? Math.max(1, Math.round(item.cookTimeMinutes)) : null,
+        prepTimeMinutes:
+          typeof item.prepTimeMinutes === 'number' ? Math.max(1, Math.round(item.prepTimeMinutes)) : null,
+        cookTimeMinutes:
+          typeof item.cookTimeMinutes === 'number' ? Math.max(1, Math.round(item.cookTimeMinutes)) : null,
         servings: typeof item.servings === 'number' && item.servings > 0 ? Math.round(item.servings) : 4,
         primaryUtensil: item.primaryUtensil?.trim() || 'Padella / Pentola',
         difficulty: normalizeDifficulty(item.difficulty),
@@ -638,8 +1032,37 @@ export interface PrepareRecipeInput {
   query?: string;
 }
 
+async function generateStructuredRecipeWithFallbackModel(
+  ai: GoogleGenAI,
+  systemInstruction: string,
+  rawSourceMaterial: string
+): Promise<Record<string, unknown>> {
+  const modelsToTry = [PRIMARY_MODEL, FALLBACK_MODEL];
+  let lastError: unknown;
+
+  for (const model of modelsToTry) {
+    try {
+      const structuredResponse = await ai.models.generateContent({
+        model,
+        contents: `Trasforma e normalizza la seguente ricetta in una scheda pulita, senza pubblicità, pronta per cucinare passo dopo passo.\n\n${rawSourceMaterial}`,
+        config: {
+          systemInstruction,
+          responseMimeType: 'application/json',
+          responseSchema: PREPARED_RECIPE_SCHEMA,
+          ...(model === PRIMARY_MODEL ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
+        },
+      });
+      return parseJsonLoose<Record<string, unknown>>(structuredResponse.text ?? '{}', {});
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  throw lastError;
+}
+
 export async function prepareTraditionalRecipe(input: PrepareRecipeInput): Promise<PreparedRecipe> {
-  const cleanUrl = input.url?.trim() || '';
+  let cleanUrl = input.url?.trim() || '';
   const cleanTitle = input.title?.trim() || '';
   const cleanQuery = input.query?.trim() || '';
 
@@ -651,7 +1074,13 @@ export async function prepareTraditionalRecipe(input: PrepareRecipeInput): Promi
     throw err;
   }
 
-  const ai = getGeminiClient();
+  // If no URL was provided, first check if we can discover a real traditional URL on the web
+  if (!cleanUrl && (cleanTitle || cleanQuery)) {
+    const discovered = await discoverRecipeUrlsFromWeb(cleanTitle || cleanQuery);
+    if (discovered[0]?.url) {
+      cleanUrl = discovered[0].url;
+    }
+  }
 
   let extractedPage: ExtractedWebPage | null = null;
   let sourceHost = 'Tradizione Web';
@@ -669,6 +1098,8 @@ export async function prepareTraditionalRecipe(input: PrepareRecipeInput): Promi
     extractedPage = await fetchCleanWebRecipePage(safeUrl.toString());
   }
 
+  const ai = getGeminiClient();
+
   const systemInstruction = `Sei un maestro di cucina tradizionale italiana che ripulisce e struttura ricette web eliminando completamente pubblicità, banner, storie superflue e qualsiasi robot da cucina.
 REGOLE TASSATIVE:
 1. Lingua: 100% italiano naturale, preciso e pratico.
@@ -680,6 +1111,10 @@ REGOLE TASSATIVE:
   let parsed: Record<string, unknown> = {};
 
   try {
+    if (!ai) {
+      throw new Error('GEMINI_MISSING');
+    }
+
     if (extractedPage && (extractedPage.jsonLdRecipe || extractedPage.cleanText.length > 250)) {
       rawSourceMaterial = `FONTE WEB ESTRATTA (${sourceHost} - ${cleanUrl}):
 TITOLO PAGINA: ${extractedPage.title}
@@ -687,9 +1122,8 @@ ${extractedPage.jsonLdRecipe ? `\nDATI STRUTTURATI JSON-LD:\n${extractedPage.jso
 TESTO PULITO DELLA PAGINA:
 ${extractedPage.cleanText}`;
     } else if (cleanUrl) {
-      // Fallback with Gemini urlContext when website blocked direct server fetch
       const contextResponse = await ai.models.generateContent({
-        model: MODEL_NAME,
+        model: PRIMARY_MODEL,
         contents: `Leggi questa pagina ricetta (${cleanUrl}) ed estrai tutti gli ingredienti esatti, le dosi, le porzioni, i tempi, le temperature di forno/fornelli e tutti i passaggi di preparazione in italiano, ignorando pubblicità e cookie banner.`,
         config: {
           tools: [{ urlContext: {} }],
@@ -698,9 +1132,8 @@ ${extractedPage.cleanText}`;
       });
       rawSourceMaterial = `CONTENUTO ESTRATTO DA ${cleanUrl}:\n${contextResponse.text ?? ''}`;
     } else {
-      // Lookup via Google Search for dish title/query
       const searchLookup = await ai.models.generateContent({
-        model: MODEL_NAME,
+        model: PRIMARY_MODEL,
         contents: `Cerca sul web la ricetta tradizionale autentica di "${cleanTitle || cleanQuery}" cucinata senza robot da cucina (solo fornelli, forno, padella, pentola). Riporta in dettaglio dosi esatte degli ingredienti, porzioni, tempi e temperature di ogni passaggio.`,
         config: {
           tools: [{ googleSearch: {} }],
@@ -710,19 +1143,9 @@ ${extractedPage.cleanText}`;
       rawSourceMaterial = `RICETTA TRADIZIONALE TROVATA SUL WEB PER "${cleanTitle || cleanQuery}":\n${searchLookup.text ?? ''}`;
     }
 
-    const structuredResponse = await ai.models.generateContent({
-      model: MODEL_NAME,
-      contents: `Trasforma e normalizza la seguente ricetta in una scheda pulita, senza pubblicità, pronta per cucinare passo dopo passo.\n\n${rawSourceMaterial}`,
-      config: {
-        systemInstruction,
-        responseMimeType: 'application/json',
-        responseSchema: PREPARED_RECIPE_SCHEMA,
-        thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
-      },
-    });
-
-    parsed = parseJsonLoose<Record<string, unknown>>(structuredResponse.text ?? '{}', {});
+    parsed = await generateStructuredRecipeWithFallbackModel(ai, systemInstruction, rawSourceMaterial);
   } catch (err) {
+    // Immediate high-precision Italian JSON-LD fallback when Gemini quota is exhausted (429) or unavailable
     if (extractedPage?.jsonLdRecipe) {
       const jsonLdFallback = buildRecipeFromJsonLdFallback(
         extractedPage.jsonLdRecipe,
@@ -734,10 +1157,28 @@ ${extractedPage.cleanText}`;
         return jsonLdFallback;
       }
     }
+    if ((err as Error).message === 'GEMINI_MISSING') {
+      const configErr = new Error(
+        'Chiave API Gemini non configurata e pagina priva di dati ricetta strutturati.'
+      ) as Error & { statusCode?: number };
+      configErr.statusCode = 500;
+      throw configErr;
+    }
     throw toCleanApiError(err);
   }
 
   if (!parsed || typeof parsed.title !== 'string' || !Array.isArray(parsed.ingredients) || !Array.isArray(parsed.steps)) {
+    if (extractedPage?.jsonLdRecipe) {
+      const jsonLdFallback = buildRecipeFromJsonLdFallback(
+        extractedPage.jsonLdRecipe,
+        sourceHost,
+        cleanUrl,
+        extractedPage.imageUrl
+      );
+      if (jsonLdFallback) {
+        return jsonLdFallback;
+      }
+    }
     const err = new Error(
       'Non è stato possibile estrarre una ricetta valida da questa fonte. Prova un altro link o cerca per nome piatto.'
     ) as Error & { statusCode?: number };

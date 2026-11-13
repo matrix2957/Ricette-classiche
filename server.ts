@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import { createServer as createHttpServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prepareTraditionalRecipe, searchTraditionalRecipes } from './lib/recipes-service.ts';
@@ -10,6 +11,7 @@ const PORT = Number(process.env.PORT) || 3000;
 
 async function startServer() {
   const app = express();
+  const httpServer = createHttpServer(app);
   app.use(express.json({ limit: '1mb' }));
 
   // API Routes (mirrored 1:1 with Vercel serverless endpoints in /api/*)
@@ -72,7 +74,11 @@ async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ws: { server: httpServer },
+        hmr: process.env.DISABLE_HMR !== 'true',
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -84,7 +90,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Ricettario Ai server in ascolto su http://0.0.0.0:${PORT}`);
   });
 }

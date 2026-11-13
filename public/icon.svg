@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="112" fill="#2D5A3D"/>
+  <rect x="24" y="24" width="464" height="464" rx="92" stroke="#FAFAF7" stroke-opacity="0.16" stroke-width="4"/>
+  <!-- Steam wisps -->
+  <path d="M196 156C196 134 214 126 214 104" stroke="#FAFAF7" stroke-width="18" stroke-linecap="round" stroke-opacity="0.9"/>
+  <path d="M256 144C256 118 274 110 274 84" stroke="#FAFAF7" stroke-width="18" stroke-linecap="round" stroke-opacity="0.9"/>
+  <path d="M316 156C316 134 334 126 334 104" stroke="#FAFAF7" stroke-width="18" stroke-linecap="round" stroke-opacity="0.9"/>
+  <!-- Lid knob -->
+  <circle cx="256" cy="196" r="18" fill="#E9C46A"/>
+  <!-- Pot lid -->
+  <path d="M132 234C132 214 188 202 256 202C324 202 380 214 380 234H132Z" fill="#FAFAF7"/>
+  <!-- Pot body -->
+  <path d="M140 256H372V334C372 374 340 402 296 402H216C172 402 140 374 140 334V256Z" fill="#FAFAF7"/>
+  <!-- Pot handles -->
+  <path d="M104 268H140V296H104C94 296 86 288 86 278V286C86 276 94 268 104 268Z" fill="#FAFAF7" fill-opacity="0.9"/>
+  <path d="M372 268H408C418 268 426 276 426 286V278C426 288 418 296 408 296H372V268Z" fill="#FAFAF7" fill-opacity="0.9"/>
+  <!-- Hearth flame under pot -->
+  <path d="M188 426H324" stroke="#E9C46A" stroke-width="14" stroke-linecap="round"/>
+</svg>

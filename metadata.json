@@ -1,0 +1,6 @@
+{
+  "name": "Focolare — Cucina Tradizionale",
+  "description": "Ricette di cucina tradizionale senza robot da cucina e senza pubblicità: ricerca web o da URL, ricalcolo porzioni, step con parametri di cottura, timer con schermo acceso e preferiti offline.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
